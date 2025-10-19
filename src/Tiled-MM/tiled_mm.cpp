@@ -12,6 +12,10 @@
 #include "gpu_blas_api.hpp"
 #include "gpu_runtime_api.hpp"
 
+#ifdef TILED_MM_HAS_BF16_SUPPORT
+#include "bf16_convert.hpp"
+#endif
+
 // #include <omp.h>
 // #include <cublasXt.h>
 // #include <libsci_acc.h>
