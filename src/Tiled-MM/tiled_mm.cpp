@@ -300,6 +300,87 @@ blas_api::StatusType cublas_gemm_wrapper_bf16(
     return blas_api::gemm_bf16(handle, op_a, op_b, m, n, k,
                                alpha, a, ld_a, b, ld_b, beta, c, lld_c);
 }
+
+// BFloat16 GEMM wrapper with device-side conversion (BF16 × BF16 → BF16)
+// This is a higher-level wrapper that matches the standard GEMM signature.
+// It performs the following:
+//   1. Call cuBLAS BF16 GEMM (produces FP32 output)
+//   2. Convert FP32 → BF16 on device using our conversion kernel
+//   3. Return BF16 output
+//
+// This allows seamless integration with the rest of Tiled-MM while maintaining
+// the benefits of FP32 accumulation for numerical accuracy.
+//
+// Note: Uses default stream (stream 0). The cuBLAS handle already has the
+//       correct stream set by the caller.
+blas_api::StatusType cublas_gemm_wrapper(
+                                   blas_api::HandleType handle,
+                                   char trans_a, char trans_b,
+                                   int m, int n, int k,
+                                   const bf16_convert::BF16Type* alpha,  // BF16 scalar
+                                   const bf16_convert::BF16Type* a,      // BF16 input
+                                   const bf16_convert::BF16Type* b,      // BF16 input
+                                   const bf16_convert::BF16Type* beta,   // BF16 scalar
+                                   bf16_convert::BF16Type* c,            // BF16 output
+                                   int lld_c) {
+    // Convert BF16 scalars to FP32 for cuBLAS
+    float alpha_fp32;
+    float beta_fp32;
+    
+#if defined(TILED_MM_CUDA)
+    alpha_fp32 = __bfloat162float(*alpha);
+    beta_fp32 = __bfloat162float(*beta);
+#elif defined(TILED_MM_ROCM)
+    alpha_fp32 = bfloat16_to_float(*alpha);
+    beta_fp32 = bfloat16_to_float(*beta);
+#endif
+
+    // Get the stream associated with this cuBLAS handle
+    bf16_convert::StreamType stream;
+#if defined(TILED_MM_CUDA)
+    cublasGetStream(handle, &stream);
+#elif defined(TILED_MM_ROCM)
+    rocblas_get_stream(handle, &stream);
+#endif
+
+    // Allocate temporary FP32 output buffer on device
+    float* c_fp32_device;
+    size_t c_size = static_cast<size_t>(m) * static_cast<size_t>(n);
+    
+#if defined(TILED_MM_CUDA)
+    cudaMalloc(&c_fp32_device, c_size * sizeof(float));
+#elif defined(TILED_MM_ROCM)
+    hipMalloc(&c_fp32_device, c_size * sizeof(float));
+#endif
+
+    // If beta != 0, we need to convert existing C from BF16 to FP32
+    if (std::abs(beta_fp32) > 0.0f) {
+        bf16_convert::convert_bf16_to_fp32(c, c_fp32_device, c_size, stream);
+    }
+
+    // Call cuBLAS BF16 GEMM (BF16 × BF16 → FP32)
+    auto status = cublas_gemm_wrapper_bf16(
+        handle, trans_a, trans_b,
+        m, n, k,
+        &alpha_fp32,
+        reinterpret_cast<const void*>(a),
+        reinterpret_cast<const void*>(b),
+        &beta_fp32,
+        c_fp32_device,
+        lld_c);
+
+    // Convert FP32 output to BF16 on device
+    bf16_convert::convert_fp32_to_bf16(c_fp32_device, c, c_size, stream);
+
+    // Free temporary buffer
+#if defined(TILED_MM_CUDA)
+    cudaFree(c_fp32_device);
+#elif defined(TILED_MM_ROCM)
+    hipFree(c_fp32_device);
+#endif
+
+    return status;
+}
 #endif // TILED_MM_HAS_BF16_SUPPORT
 
 
@@ -702,5 +783,22 @@ template void gemm<zdouble>(
 	zdouble beta,
 	zdouble* c, int ld_c,
         bool pin_host_buffers, bool copy_c_back);
+
+#ifdef TILED_MM_HAS_BF16_SUPPORT
+// BFloat16 template instantiation
+// Uses bf16_convert::BF16Type which is:
+//   - __nv_bfloat16 on CUDA
+//   - hip_bfloat16 on ROCm
+template void gemm<bf16_convert::BF16Type>(
+	mm_handle<bf16_convert::BF16Type>& handle,
+	char transa, char transb,
+        int m, int n, int k,
+	bf16_convert::BF16Type alpha,
+	bf16_convert::BF16Type* a, int ld_a,
+	bf16_convert::BF16Type* b, int ld_b, 
+	bf16_convert::BF16Type beta,
+	bf16_convert::BF16Type* c, int ld_c,
+        bool pin_host_buffers, bool copy_c_back);
+#endif
 
 }
