@@ -267,6 +267,38 @@ blas_api::StatusType cublas_gemm_wrapper(blas_api::HandleType handle,
                          reinterpret_cast<blas_api::ComplexDoubleType*>(c), lld_c);
 }
 
+#ifdef TILED_MM_HAS_BF16_SUPPORT
+// BFloat16 GEMM wrapper (mixed precision: BF16 × BF16 → FP32)
+// Note: Unlike other types, this performs mixed-precision computation:
+//       - Inputs (A, B): BF16 (16-bit)
+//       - Output (C): FP32 (32-bit)
+//       - Scalars (alpha, beta): FP32
+//       - Accumulation: FP32 (higher precision than BF16)
+//
+// This is the standard pattern for BF16 GEMM on modern GPUs to maintain
+// numerical accuracy while reducing memory bandwidth.
+blas_api::StatusType cublas_gemm_wrapper_bf16(
+		                   blas_api::HandleType handle,
+		                   char trans_a, char trans_b,
+                                   int m, int n, int k,
+                                   const float* alpha,      // FP32 scalar
+                                   const void* a,           // BF16 input
+                                   const void* b,           // BF16 input
+                                   const float* beta,       // FP32 scalar
+                                   float* c,                // FP32 output
+                                   int lld_c) {
+    blas_api::OperationType op_a = get_blas_operation(trans_a);
+    blas_api::OperationType op_b = get_blas_operation(trans_b);
+
+    int ld_a = get_first(trans_a, m , k);
+    int ld_b = get_first(trans_b, k , n);
+
+    return blas_api::gemm_bf16(handle, op_a, op_b, m, n, k,
+                               alpha, a, ld_a, b, ld_b, beta, c, lld_c);
+}
+#endif // TILED_MM_HAS_BF16_SUPPORT
+
+
 template<typename Scalar>
 void round_robin(tiled_matrix<Scalar>& a_host, tiled_matrix<Scalar>& b_host, tiled_matrix<Scalar>& c_host,
         device_buffer<Scalar>& a_device,
